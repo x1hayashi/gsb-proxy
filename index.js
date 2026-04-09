@@ -1,40 +1,78 @@
 const http   = require("http");
 const url    = require("url");
-const fs     = require("fs");
-const path   = require("path");
 const crypto = require("crypto");
 
 // ── CONFIG ─────────────────────────────────────────────────
-const GSB_HOST = "api.gsbsoftware.com.br";
-const GSB_PORT = 50013;
-const GSB_AUTH = "Basic " + Buffer.from("hayashi:cpjlk54*#spl89").toString("base64");
-const GSB_CLIENTE = "cf051147574882010032";
-const GSB_TOKEN   = "$2a$10$BueYcMU8EZboMx3Fy12S8";
-const PORT = process.env.PORT || 3000;
-const DATA_FILE = "/tmp/gsb_data.json";
+const GSB_HOST  = "api.gsbsoftware.com.br";
+const GSB_PORT  = 50013;
+const GSB_AUTH  = "Basic " + Buffer.from("hayashi:cpjlk54*#spl89").toString("base64");
+const GSB_CLI   = "cf051147574882010032";
+const GSB_TOK   = "$2a$10$BueYcMU8EZboMx3Fy12S8";
+const PORT      = process.env.PORT || 3000;
 
-// ── PERSISTÊNCIA ───────────────────────────────────────────
-function loadData() {
-  try { return JSON.parse(fs.readFileSync(DATA_FILE, "utf8")); }
-  catch {
-    return {
-      config:       { whatsHGO: "", whatsHBA: "" },
-      solicitacoes: [],
-      usuarios:     [],
-      sessoes:      {}
+const SB_URL    = process.env.SUPABASE_URL  || "https://jcxufffjufocevvcbcxv.supabase.co";
+const SB_KEY    = process.env.SUPABASE_KEY  || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpjeHVmZmZqdWZvY2V2dmNiY3h2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3NTkwNDgsImV4cCI6MjA5MTMzNTA0OH0.40E2DJmYdzfSizgdEtd-GWzesNRY-bAN8LRR_4w_iJ0";
+
+// ── SUPABASE REST HELPER ───────────────────────────────────
+const https = require("https");
+
+function sbReq(method, table, body, query) {
+  return new Promise((resolve, reject) => {
+    let path = `/rest/v1/${table}`;
+    if (query) path += `?${query}`;
+    const data = body ? JSON.stringify(body) : null;
+    const opts = {
+      hostname: new URL(SB_URL).hostname,
+      port: 443,
+      path,
+      method,
+      headers: {
+        "apikey":        SB_KEY,
+        "Authorization": "Bearer " + SB_KEY,
+        "Content-Type":  "application/json",
+        "Prefer":        method === "POST" ? "return=representation" : "return=representation",
+      },
     };
-  }
+    if (data) opts.headers["Content-Length"] = Buffer.byteLength(data);
+    const req = https.request(opts, res => {
+      let d = "";
+      res.on("data", c => d += c);
+      res.on("end", () => {
+        try { resolve({ status: res.statusCode, data: JSON.parse(d || "[]") }); }
+        catch { resolve({ status: res.statusCode, data: d }); }
+      });
+    });
+    req.on("error", reject);
+    if (data) req.write(data);
+    req.end();
+  });
 }
-function saveData(d) { fs.writeFileSync(DATA_FILE, JSON.stringify(d), "utf8"); }
 
-function hash(str) { return crypto.createHash("sha256").update(str).digest("hex"); }
-function token()   { return crypto.randomBytes(32).toString("hex"); }
+// Helpers Supabase
+async function sbGet(table, query)       { return sbReq("GET",    table, null,  query); }
+async function sbPost(table, body)       { return sbReq("POST",   table, body,  null); }
+async function sbPatch(table, body, q)   { return sbReq("PATCH",  table, body,  q); }
+async function sbDelete(table, query)    { return sbReq("DELETE", table, null,  query); }
 
-// ── HELPERS ────────────────────────────────────────────────
+// ── AUTH ───────────────────────────────────────────────────
+function hashSenha(s) { return crypto.createHash("sha256").update(s + "gsb2026").digest("hex"); }
+function gerarToken() { return crypto.randomBytes(32).toString("hex"); }
+
+async function getSession(req) {
+  const tok = (req.headers["authorization"] || "").replace("Bearer ", "").trim();
+  if (!tok) return null;
+  const r = await sbGet("sessoes", `token=eq.${tok}&expira_em=gte.${new Date().toISOString()}&select=user_id,usuarios(id,nome,whatsapp,filial,status,admin)`);
+  if (!r.data || !r.data[0]) return null;
+  const u = r.data[0].usuarios;
+  if (!u || u.status !== "aprovado") return null;
+  return u;
+}
+
+// ── HTTP HELPERS ───────────────────────────────────────────
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
 }
 function json(res, status, obj) {
   cors(res); res.setHeader("Content-Type", "application/json");
@@ -42,228 +80,193 @@ function json(res, status, obj) {
 }
 function readBody(req) {
   return new Promise(resolve => {
-    let b = "";
-    req.on("data", c => b += c);
+    let b = ""; req.on("data", c => b += c);
     req.on("end", () => { try { resolve(JSON.parse(b)); } catch { resolve({}); } });
   });
 }
-function authMiddleware(req, res) {
-  const data = loadData();
-  const authHeader = req.headers["authorization"] || "";
-  const tok = authHeader.replace("Bearer ", "").trim();
-  if (!tok) return null;
-  const sessao = data.sessoes[tok];
-  if (!sessao) return null;
-  // Sessão expira em 7 dias
-  if (Date.now() - sessao.criada > 7 * 24 * 60 * 60 * 1000) {
-    delete data.sessoes[tok]; saveData(data); return null;
-  }
-  const usuario = data.usuarios.find(u => u.id === sessao.userId);
-  return usuario || null;
-}
 
 // ── GSB PROXY ──────────────────────────────────────────────
-function proxyGSB(cleanPath, res) {
-  const options = {
-    hostname: GSB_HOST, port: GSB_PORT,
-    path: `${cleanPath}/${GSB_CLIENTE}/${GSB_TOKEN}`,
+function proxyGSB(gsbPath, res) {
+  const opts = {
+    hostname: GSB_HOST, port: GSB_PORT, path: gsbPath,
     method: "GET",
     headers: { "Authorization": GSB_AUTH, "Content-Type": "application/json" },
   };
-  const proxy = http.request(options, gsb => {
-    let data = "";
-    gsb.on("data", c => data += c);
+  const px = http.request(opts, gsb => {
+    let d = ""; gsb.on("data", c => d += c);
     gsb.on("end", () => {
-      try { json(res, gsb.statusCode, JSON.parse(data || "null")); }
-      catch { json(res, 500, { error: "Parse error" }); }
+      try { json(res, gsb.statusCode, JSON.parse(d || "null")); }
+      catch { json(res, gsb.statusCode, { raw: d }); }
     });
   });
-  proxy.on("error", e => json(res, 500, { error: e.message }));
-  proxy.end();
-}
-
-function proxyGSBDated(cleanPath, d1, d2, res) {
-  const options = {
-    hostname: GSB_HOST, port: GSB_PORT,
-    path: `${cleanPath}/${d1}/${d2}/${GSB_CLIENTE}/${GSB_TOKEN}`,
-    method: "GET",
-    headers: { "Authorization": GSB_AUTH, "Content-Type": "application/json" },
-  };
-  const proxy = http.request(options, gsb => {
-    let data = "";
-    gsb.on("data", c => data += c);
-    gsb.on("end", () => {
-      try { json(res, gsb.statusCode, JSON.parse(data || "null")); }
-      catch { json(res, 500, { error: "Parse error" }); }
-    });
-  });
-  proxy.on("error", e => json(res, 500, { error: e.message }));
-  proxy.end();
+  px.on("error", e => json(res, 500, { error: e.message }));
+  px.end();
 }
 
 // ── SERVER ─────────────────────────────────────────────────
-const server = http.createServer(async (req, res) => {
+http.createServer(async (req, res) => {
   cors(res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  const parsed   = url.parse(req.url, true);
-  const pathname = parsed.pathname;
+  const p = url.parse(req.url, true).pathname;
 
-  // ── AUTH: Registro ─────────────────────────────────────
-  if (req.method === "POST" && pathname === "/auth/registrar") {
-    const body = await readBody(req);
-    const { nome, whatsapp, senha, filial } = body;
-    if (!nome || !whatsapp || !senha) return json(res, 400, { error: "Campos obrigatórios" });
-    const data = loadData();
-    if (data.usuarios.find(u => u.whatsapp === whatsapp))
+  // ── REGISTRO ───────────────────────────────────────────────
+  if (req.method === "POST" && p === "/auth/registrar") {
+    const { nome, whatsapp, senha, filial } = await readBody(req);
+    if (!nome || !whatsapp || !senha || !filial)
+      return json(res, 400, { error: "Preencha todos os campos" });
+
+    const whatsClean = whatsapp.replace(/\D/g, "");
+    // Verifica se já existe
+    const existe = await sbGet("usuarios", `whatsapp=eq.${whatsClean}`);
+    if (existe.data && existe.data.length > 0)
       return json(res, 409, { error: "WhatsApp já cadastrado" });
+
+    // Verifica se é o primeiro usuário
+    const todos = await sbGet("usuarios", "select=id");
+    const primeiro = !todos.data || todos.data.length === 0;
+
     const novo = {
-      id:        Date.now(),
       nome,
-      whatsapp:  whatsapp.replace(/\D/g, ""),
-      senhaHash: hash(senha),
-      filial:    filial || "",
-      status:    "pendente", // pendente | aprovado | bloqueado
-      admin:     false,
-      criado:    new Date().toISOString(),
+      whatsapp: whatsClean,
+      senha_hash: hashSenha(senha),
+      filial,
+      status: primeiro ? "aprovado" : "pendente",
+      admin:  primeiro,
     };
-    // Primeiro usuário vira admin aprovado automaticamente
-    if (data.usuarios.length === 0) { novo.status = "aprovado"; novo.admin = true; }
-    data.usuarios.push(novo);
-    saveData(data);
-    return json(res, 201, { ok: true, primeiroAdmin: novo.admin });
+    const r = await sbPost("usuarios", novo);
+    if (r.status !== 201) return json(res, 500, { error: "Erro ao criar usuário" });
+    return json(res, 201, { ok: true, primeiroAdmin: primeiro });
   }
 
-  // ── AUTH: Login ────────────────────────────────────────
-  if (req.method === "POST" && pathname === "/auth/login") {
+  // ── LOGIN ──────────────────────────────────────────────────
+  if (req.method === "POST" && p === "/auth/login") {
+    const { whatsapp, senha } = await readBody(req);
+    const whatsClean = (whatsapp || "").replace(/\D/g, "");
+    const r = await sbGet("usuarios", `whatsapp=eq.${whatsClean}&senha_hash=eq.${hashSenha(senha)}`);
+    if (!r.data || !r.data[0]) return json(res, 401, { error: "WhatsApp ou senha incorretos" });
+    const u = r.data[0];
+    if (u.status === "pendente")  return json(res, 403, { error: "Aguardando aprovação do administrador" });
+    if (u.status === "bloqueado") return json(res, 403, { error: "Acesso bloqueado" });
+
+    const token = gerarToken();
+    const expira = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    await sbPost("sessoes", { token, user_id: u.id, expira_em: expira });
+
+    return json(res, 200, { token, nome: u.nome, filial: u.filial, admin: u.admin, id: u.id });
+  }
+
+  // ── ADMIN: LISTAR USUÁRIOS ─────────────────────────────────
+  if (req.method === "GET" && p === "/admin/usuarios") {
+    const sess = await getSession(req);
+    if (!sess || !sess.admin) return json(res, 403, { error: "Sem permissão" });
+    const r = await sbGet("usuarios", "select=id,nome,whatsapp,filial,status,admin,criado_em&order=criado_em.asc");
+    return json(res, 200, r.data || []);
+  }
+
+  // ── ADMIN: ATUALIZAR USUÁRIO ───────────────────────────────
+  if (req.method === "PUT" && p.startsWith("/admin/usuarios/")) {
+    const sess = await getSession(req);
+    if (!sess || !sess.admin) return json(res, 403, { error: "Sem permissão" });
+    const id   = p.split("/")[3];
     const body = await readBody(req);
-    const { whatsapp, senha } = body;
-    const data = loadData();
-    const usuario = data.usuarios.find(u =>
-      u.whatsapp === whatsapp.replace(/\D/g, "") && u.senhaHash === hash(senha)
-    );
-    if (!usuario) return json(res, 401, { error: "Credenciais inválidas" });
-    if (usuario.status === "pendente")  return json(res, 403, { error: "Aguardando aprovação do administrador" });
-    if (usuario.status === "bloqueado") return json(res, 403, { error: "Acesso bloqueado" });
-    const tok = token();
-    if (!data.sessoes) data.sessoes = {};
-    data.sessoes[tok] = { userId: usuario.id, criada: Date.now() };
-    saveData(data);
-    return json(res, 200, {
-      token: tok,
-      nome:  usuario.nome,
-      filial: usuario.filial,
-      admin: usuario.admin,
-      id:    usuario.id,
-    });
-  }
-
-  // ── AUTH: Logout ───────────────────────────────────────
-  if (req.method === "POST" && pathname === "/auth/logout") {
-    const tok = (req.headers["authorization"] || "").replace("Bearer ", "");
-    const data = loadData();
-    delete data.sessoes[tok];
-    saveData(data);
+    const upd  = {};
+    if (body.status) upd.status = body.status;
+    if (body.admin  !== undefined) upd.admin = body.admin;
+    await sbPatch("usuarios", upd, `id=eq.${id}`);
     return json(res, 200, { ok: true });
   }
 
-  // ── ADMIN: Lista usuários (admin only) ─────────────────
-  if (req.method === "GET" && pathname === "/admin/usuarios") {
-    const user = authMiddleware(req, res);
-    if (!user || !user.admin) return json(res, 403, { error: "Sem permissão" });
-    const data = loadData();
-    return json(res, 200, data.usuarios.map(u => ({
-      id: u.id, nome: u.nome, whatsapp: u.whatsapp,
-      filial: u.filial, status: u.status, admin: u.admin, criado: u.criado,
-    })));
-  }
-
-  // ── ADMIN: Aprovar/Bloquear usuário ────────────────────
-  if (req.method === "PUT" && pathname.startsWith("/admin/usuarios/")) {
-    const user = authMiddleware(req, res);
-    if (!user || !user.admin) return json(res, 403, { error: "Sem permissão" });
-    const id   = parseInt(pathname.split("/")[3]);
-    const body = await readBody(req);
-    const data = loadData();
-    const idx  = data.usuarios.findIndex(u => u.id === id);
-    if (idx === -1) return json(res, 404, { error: "Usuário não encontrado" });
-    if (body.status) data.usuarios[idx].status = body.status;
-    if (body.admin !== undefined) data.usuarios[idx].admin = body.admin;
-    if (body.filial) data.usuarios[idx].filial = body.filial;
-    saveData(data);
+  // ── ADMIN: REMOVER USUÁRIO ─────────────────────────────────
+  if (req.method === "DELETE" && p.startsWith("/admin/usuarios/")) {
+    const sess = await getSession(req);
+    if (!sess || !sess.admin) return json(res, 403, { error: "Sem permissão" });
+    const id = p.split("/")[3];
+    await sbDelete("sessoes",  `user_id=eq.${id}`);
+    await sbDelete("usuarios", `id=eq.${id}`);
     return json(res, 200, { ok: true });
   }
 
-  // ── CONFIG ─────────────────────────────────────────────
-  if (req.method === "GET" && pathname === "/config") {
-    const user = authMiddleware(req, res);
-    if (!user) return json(res, 401, { error: "Não autenticado" });
-    return json(res, 200, loadData().config);
-  }
-  if (req.method === "PUT" && pathname === "/config") {
-    const user = authMiddleware(req, res);
-    if (!user || !user.admin) return json(res, 403, { error: "Sem permissão" });
-    const body = await readBody(req);
-    const data = loadData();
-    data.config = { ...data.config, ...body };
-    saveData(data);
-    return json(res, 200, { ok: true });
+  // ── CONFIG ─────────────────────────────────────────────────
+  if (req.method === "GET" && p === "/config") {
+    const sess = await getSession(req);
+    if (!sess) return json(res, 401, { error: "Não autenticado" });
+    const r = await sbGet("config", "select=chave,valor");
+    const cfg = {};
+    (r.data || []).forEach(row => cfg[row.chave] = row.valor);
+    return json(res, 200, cfg);
   }
 
-  // ── SOLICITAÇÕES ───────────────────────────────────────
-  if (req.method === "GET" && pathname === "/solicitacoes") {
-    const user = authMiddleware(req, res);
-    if (!user) return json(res, 401, { error: "Não autenticado" });
-    return json(res, 200, loadData().solicitacoes);
-  }
-  if (req.method === "POST" && pathname === "/solicitacoes") {
-    const user = authMiddleware(req, res);
-    if (!user) return json(res, 401, { error: "Não autenticado" });
+  if (req.method === "PUT" && p === "/config") {
+    const sess = await getSession(req);
+    if (!sess || !sess.admin) return json(res, 403, { error: "Sem permissão" });
     const body = await readBody(req);
-    const data = loadData();
-    const nova = {
-      id: Date.now(), ...body,
-      userId:      user.id,
-      dataSolicit: new Date().toISOString(),
-      status:      "pendente",
-    };
-    data.solicitacoes.push(nova);
-    saveData(data);
-    return json(res, 201, nova);
-  }
-  if (req.method === "PUT" && pathname.startsWith("/solicitacoes/")) {
-    const user = authMiddleware(req, res);
-    if (!user) return json(res, 401, { error: "Não autenticado" });
-    const id   = parseInt(pathname.split("/")[2]);
-    const body = await readBody(req);
-    const data = loadData();
-    const idx  = data.solicitacoes.findIndex(s => s.id === id);
-    if (idx !== -1) { data.solicitacoes[idx] = { ...data.solicitacoes[idx], ...body }; saveData(data); }
-    return json(res, 200, { ok: true });
-  }
-  if (req.method === "DELETE" && pathname.startsWith("/solicitacoes/")) {
-    const user = authMiddleware(req, res);
-    if (!user) return json(res, 401, { error: "Não autenticado" });
-    const id   = parseInt(pathname.split("/")[2]);
-    const data = loadData();
-    data.solicitacoes = data.solicitacoes.filter(s => s.id !== id);
-    saveData(data);
-    return json(res, 200, { ok: true });
-  }
-
-  // ── GSB PROXY (autenticado) ────────────────────────────
-  if (pathname.startsWith("/proxy/")) {
-    const user = authMiddleware(req, res);
-    if (!user) return json(res, 401, { error: "Não autenticado" });
-    const parts = pathname.replace(/^\/proxy\//, "").split("/");
-    // Detecta se é rota com data: /proxy/endpoint/d1/d2
-    if (parts.length === 3) {
-      return proxyGSBDated(`/${parts[0]}`, parts[1], parts[2], res);
+    for (const [chave, valor] of Object.entries(body)) {
+      await sbPatch("config", { valor }, `chave=eq.${chave}`);
     }
-    return proxyGSB(`/${parts[0]}`, res);
+    return json(res, 200, { ok: true });
+  }
+
+  // ── SOLICITAÇÕES ───────────────────────────────────────────
+  if (req.method === "GET" && p === "/solicitacoes") {
+    const sess = await getSession(req);
+    if (!sess) return json(res, 401, { error: "Não autenticado" });
+    const r = await sbGet("solicitacoes", "order=data_solicit.desc");
+    return json(res, 200, r.data || []);
+  }
+
+  if (req.method === "POST" && p === "/solicitacoes") {
+    const sess = await getSession(req);
+    if (!sess) return json(res, 401, { error: "Não autenticado" });
+    const body = await readBody(req);
+    const nova = {
+      filial:          body.filial,
+      solicitante:     body.solicitante,
+      id_imobilizado:  body.idImobilizado,
+      num_imobilizado: body.numImobilizado,
+      equip_nome:      body.equipNome,
+      descricao:       body.descricao,
+      prazo:           body.prazo || null,
+      status:          "pendente",
+      user_id:         sess.id,
+    };
+    const r = await sbPost("solicitacoes", nova);
+    return json(res, 201, r.data?.[0] || nova);
+  }
+
+  if (req.method === "PUT" && p.startsWith("/solicitacoes/")) {
+    const sess = await getSession(req);
+    if (!sess) return json(res, 401, { error: "Não autenticado" });
+    const id   = p.split("/")[2];
+    const body = await readBody(req);
+    const upd  = {};
+    if (body.status) upd.status = body.status;
+    await sbPatch("solicitacoes", upd, `id=eq.${id}`);
+    return json(res, 200, { ok: true });
+  }
+
+  if (req.method === "DELETE" && p.startsWith("/solicitacoes/")) {
+    const sess = await getSession(req);
+    if (!sess) return json(res, 401, { error: "Não autenticado" });
+    const id = p.split("/")[2];
+    await sbDelete("solicitacoes", `id=eq.${id}`);
+    return json(res, 200, { ok: true });
+  }
+
+  // ── GSB PROXY ──────────────────────────────────────────────
+  if (p.startsWith("/proxy/")) {
+    const sess = await getSession(req);
+    if (!sess) return json(res, 401, { error: "Não autenticado" });
+    const parts = p.replace(/^\/proxy\//, "").split("/");
+    let gsbPath;
+    if (parts.length === 3) {
+      gsbPath = `/${parts[0]}/${parts[1]}/${parts[2]}/${GSB_CLI}/${encodeURIComponent(GSB_TOK)}`;
+    } else {
+      gsbPath = `/${parts[0]}/${GSB_CLI}/${encodeURIComponent(GSB_TOK)}`;
+    }
+    return proxyGSB(gsbPath, res);
   }
 
   json(res, 404, { error: "Not found" });
-});
 
-server.listen(PORT, () => console.log(`GSB Servidor rodando na porta ${PORT}`));
+}).listen(PORT, () => console.log(`GSB + Supabase rodando na porta ${PORT}`));
