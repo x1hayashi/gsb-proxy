@@ -85,22 +85,90 @@ function readBody(req) {
   });
 }
 
-// ── GSB PROXY ──────────────────────────────────────────────
+// ── GSB CACHE ──────────────────────────────────────────────
+// Guarda respostas da API GSB em memória por um tempo
+// Cadastros (funcionarios, setores, etc): 10 minutos
+// OS do período: 2 minutos
+const cache = new Map(); // key → { data, expiresAt }
+const pending = new Map(); // key → Promise (deduplicação)
+
+const TTL = {
+  default:  10 * 60 * 1000, // 10 min para cadastros estáticos
+  os:        2 * 60 * 1000, // 2 min para OS e produtos
+};
+
+function cacheKey(path) { return path; }
+
+function getTTL(path) {
+  if (path.includes('ordemservico') || path.includes('produto')) return TTL.os;
+  return TTL.default;
+}
+
+function fromCache(key) {
+  const entry = cache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) { cache.delete(key); return null; }
+  return entry.data;
+}
+
+function toCache(key, data, ttl) {
+  cache.set(key, { data, expiresAt: Date.now() + ttl });
+}
+
+// ── GSB PROXY COM CACHE ────────────────────────────────────
 function proxyGSB(gsbPath, res) {
-  const opts = {
-    hostname: GSB_HOST, port: GSB_PORT, path: gsbPath,
-    method: "GET",
-    headers: { "Authorization": GSB_AUTH, "Content-Type": "application/json" },
-  };
-  const px = http.request(opts, gsb => {
-    let d = ""; gsb.on("data", c => d += c);
-    gsb.on("end", () => {
-      try { json(res, gsb.statusCode, JSON.parse(d || "null")); }
-      catch { json(res, gsb.statusCode, { raw: d }); }
+  const key = cacheKey(gsbPath);
+
+  // 1. Tenta retornar do cache
+  const cached = fromCache(key);
+  if (cached) {
+    res.setHeader('X-Cache', 'HIT');
+    return json(res, 200, cached);
+  }
+
+  // 2. Se já há uma requisição em andamento para o mesmo endpoint,
+  //    aguarda ela terminar em vez de fazer nova chamada (deduplicação)
+  if (pending.has(key)) {
+    pending.get(key).then(data => {
+      if (data) json(res, 200, data);
+      else json(res, 502, { error: 'Upstream error' });
+    }).catch(() => json(res, 502, { error: 'Upstream error' }));
+    return;
+  }
+
+  // 3. Faz a requisição real à GSB
+  const promise = new Promise((resolve) => {
+    const opts = {
+      hostname: GSB_HOST, port: GSB_PORT, path: gsbPath,
+      method: "GET",
+      headers: { "Authorization": GSB_AUTH, "Content-Type": "application/json" },
+    };
+    const px = http.request(opts, gsb => {
+      let d = ""; gsb.on("data", c => d += c);
+      gsb.on("end", () => {
+        pending.delete(key);
+        try {
+          const parsed = JSON.parse(d || "null");
+          if (gsb.statusCode === 200) {
+            toCache(key, parsed, getTTL(gsbPath));
+          }
+          json(res, gsb.statusCode, parsed);
+          resolve(gsb.statusCode === 200 ? parsed : null);
+        } catch {
+          json(res, gsb.statusCode, { raw: d });
+          resolve(null);
+        }
+      });
     });
+    px.on("error", e => {
+      pending.delete(key);
+      json(res, 500, { error: e.message });
+      resolve(null);
+    });
+    px.end();
   });
-  px.on("error", e => json(res, 500, { error: e.message }));
-  px.end();
+
+  pending.set(key, promise);
 }
 
 // ── SERVER ─────────────────────────────────────────────────
@@ -251,6 +319,16 @@ http.createServer(async (req, res) => {
     const id = p.split("/")[2];
     await sbDelete("solicitacoes", `id=eq.${id}`);
     return json(res, 200, { ok: true });
+  }
+
+  // ── LIMPAR CACHE (admin) ───────────────────────────────────
+  if (req.method === "POST" && p === "/cache/clear") {
+    const sess = await getSession(req);
+    if (!sess || !sess.admin) return json(res, 403, { error: "Sem permissão" });
+    const size = cache.size;
+    cache.clear();
+    pending.clear();
+    return json(res, 200, { ok: true, cleared: size });
   }
 
   // ── GSB PROXY ──────────────────────────────────────────────
