@@ -11,7 +11,7 @@ const GSB_TOK   = "$2a$10$BueYcMU8EZboMx3Fy12S8";
 const PORT      = process.env.PORT || 3000;
 
 const SB_URL    = process.env.SUPABASE_URL  || "https://jcxufffjufocevvcbcxv.supabase.co";
-const SB_KEY    = process.env.SUPABASE_KEY  || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpjeHVmZmZqdWZvY2V2dmNiY3h2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU3NTkwNDgsImV4cCI6MjA5MTMzNTA0OH0.40E2DJmYdzfSizgdEtd-GWzesNRY-bAN8LRR_4w_iJ0";
+const SB_KEY    = process.env.SUPABASE_KEY  || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpjeHVmZmZqdWZvY2V2dmNiY3h2Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTc1OTA0OCwiZXhwIjoyMDkxMzM1MDQ4fQ.261UMp8hf03Ua-hhOEMZzQem_w5zheOuoJmnmnfWPgU";
 
 // ── SUPABASE REST HELPER ───────────────────────────────────
 const https = require("https");
