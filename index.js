@@ -42,7 +42,9 @@ function sbReq(method, table, body, query) {
         catch { resolve({ status: res.statusCode, data: d }); }
       });
     });
-    req.on("error", reject);
+    req.on("error", e => {
+      resolve({ status: 503, data: { error: e.message, code: e.code } });
+    });
     if (data) req.write(data);
     req.end();
   });
@@ -53,6 +55,14 @@ async function sbGet(table, query)       { return sbReq("GET",    table, null,  
 async function sbPost(table, body)       { return sbReq("POST",   table, body,  null); }
 async function sbPatch(table, body, q)   { return sbReq("PATCH",  table, body,  q); }
 async function sbDelete(table, query)    { return sbReq("DELETE", table, null,  query); }
+
+// Captura erros não tratados para evitar que o servidor trave
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException:", err.message);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("unhandledRejection:", reason);
+});
 
 // ── AUTH ───────────────────────────────────────────────────
 function hashSenha(s) { return crypto.createHash("sha256").update(s + "gsb2026").digest("hex"); }
@@ -173,6 +183,7 @@ function proxyGSB(gsbPath, res) {
 
 // ── SERVER ─────────────────────────────────────────────────
 http.createServer(async (req, res) => {
+  try {
   cors(res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
@@ -351,6 +362,11 @@ http.createServer(async (req, res) => {
   }
 
   json(res, 404, { error: "Not found" });
+
+  } catch(e) {
+    console.error("Request error:", e.message);
+    try { json(res, 500, { error: "Erro interno: " + e.message }); } catch {}
+  }
 
 }).listen(PORT, () => {
   console.log(`GSB + Supabase rodando na porta ${PORT}`);
