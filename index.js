@@ -321,6 +321,11 @@ http.createServer(async (req, res) => {
     return json(res, 200, { ok: true });
   }
 
+  // ── PING (keep alive) ──────────────────────────────────────
+  if (p === "/ping") {
+    res.writeHead(200); res.end("ok"); return;
+  }
+
   // ── LIMPAR CACHE (admin) ───────────────────────────────────
   if (req.method === "POST" && p === "/cache/clear") {
     const sess = await getSession(req);
@@ -347,4 +352,18 @@ http.createServer(async (req, res) => {
 
   json(res, 404, { error: "Not found" });
 
-}).listen(PORT, () => console.log(`GSB + Supabase rodando na porta ${PORT}`));
+}).listen(PORT, () => {
+  console.log(`GSB + Supabase rodando na porta ${PORT}`);
+
+  // ── KEEP ALIVE: bate no próprio servidor a cada 10 min ────
+  // Evita que o Render adormeça no plano gratuito
+  const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  setInterval(() => {
+    https.get(SELF_URL + '/ping', res => {
+      res.resume();
+    }).on('error', () => {
+      // Tenta via http se https falhar
+      http.get(SELF_URL.replace('https','http') + '/ping', r => r.resume()).on('error', ()=>{});
+    });
+  }, 10 * 60 * 1000); // 10 minutos
+});
