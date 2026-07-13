@@ -235,6 +235,21 @@ http.createServer(async (req, res) => {
     return json(res, 200, { token, nome: u.nome, filial: u.filial, admin: u.admin, id: u.id });
   }
 
+  // ── ALTERAR SENHA (usuário logado) ────────────────────────
+  if (req.method === "POST" && p === "/auth/alterar-senha") {
+    const sess = await getSession(req);
+    if (!sess) return json(res, 401, { error: "Não autenticado" });
+    const { senha_atual, nova_senha } = await readBody(req);
+    if (!senha_atual || !nova_senha || nova_senha.length < 4)
+      return json(res, 400, { error: "Dados inválidos" });
+    // Verifica senha atual
+    const r = await sbGet("usuarios", `id=eq.${sess.id}&senha_hash=eq.${hashSenha(senha_atual)}&select=id`);
+    if (!r.data || !r.data[0])
+      return json(res, 401, { error: "Senha atual incorreta" });
+    await sbPatch("usuarios", { senha_hash: hashSenha(nova_senha) }, `id=eq.${sess.id}`);
+    return json(res, 200, { ok: true });
+  }
+
   // ── ADMIN: LISTAR USUÁRIOS ─────────────────────────────────
   if (req.method === "GET" && p === "/admin/usuarios") {
     const sess = await getSession(req);
@@ -252,6 +267,7 @@ http.createServer(async (req, res) => {
     const upd  = {};
     if (body.status) upd.status = body.status;
     if (body.admin  !== undefined) upd.admin = body.admin;
+    if (body.nova_senha) upd.senha_hash = hashSenha(body.nova_senha);
     await sbPatch("usuarios", upd, `id=eq.${id}`);
     return json(res, 200, { ok: true });
   }
@@ -370,16 +386,4 @@ http.createServer(async (req, res) => {
 
 }).listen(PORT, () => {
   console.log(`GSB + Supabase rodando na porta ${PORT}`);
-
-  // ── KEEP ALIVE: bate no próprio servidor a cada 10 min ────
-  // Evita que o Render adormeça no plano gratuito
-  const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-  setInterval(() => {
-    https.get(SELF_URL + '/ping', res => {
-      res.resume();
-    }).on('error', () => {
-      // Tenta via http se https falhar
-      http.get(SELF_URL.replace('https','http') + '/ping', r => r.resume()).on('error', ()=>{});
-    });
-  }, 10 * 60 * 1000); // 10 minutos
 });
